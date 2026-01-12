@@ -1,0 +1,12 @@
+dieFinanz
+derFinanz_bot
+
+Use this token to access the HTTP API:
+8536996388:AAGU-g53PHiJ8lwHm0lWUKL9xKxt3GdqPYk
+Keep your token secure and store it safely, it can be used by anyone to control your bot.
+
+pip install numpy
+pip install matplotlib --prefer-binary
+pip install scikit-learn --prefer-binary
+pip install aiogram==3.4.1
+
