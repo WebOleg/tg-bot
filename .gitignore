@@ -27,3 +27,4 @@ env/
 
 # Config with secrets
 # config.py
+.DS_Store
