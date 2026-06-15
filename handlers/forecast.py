@@ -6,7 +6,7 @@ from aiogram.types import FSInputFile
 from datetime import datetime
 
 from database import get_transactions_for_forecast
-from ml.linear_model import forecast_series
+from ml.linear_model import forecast_with_metrics
 from utils.charts import build_forecast_chart
 
 router = Router()
@@ -35,7 +35,7 @@ async def make_forecast(message: Message, state: FSMContext):
 
     rows = get_transactions_for_forecast(message.from_user.id)
     if not rows:
-        await message.answer("❌ Недостатньо даних для прогнозу. Спочатку додайте транзакції.")
+        await message.answer("❌ Недостатньо даних для прогнозу.")
         await state.clear()
         return
 
@@ -51,7 +51,7 @@ async def make_forecast(message: Message, state: FSMContext):
     all_dates = sorted(set(daily_expenses.keys()) | set(daily_incomes.keys()))
     
     if len(all_dates) < 2:
-        await message.answer("❌ Недостатньо даних для прогнозу. Потрібно хоча б 2 дні з транзакціями.")
+        await message.answer("❌ Недостатньо даних. Потрібно хоча б 2 дні з транзакціями.")
         await state.clear()
         return
 
@@ -73,13 +73,35 @@ async def make_forecast(message: Message, state: FSMContext):
     avg_month_expense = avg_daily_expense * 30
     avg_month_balance = avg_month_income - avg_month_expense
 
-    expense_pred = forecast_series(expenses_by_day, days)
-    income_pred = forecast_series(incomes_by_day, days)
+    # === ПРОГНОЗ З МЕТРИКАМИ ===
+    expense_result = forecast_with_metrics(expenses_by_day, days)
+    income_result = forecast_with_metrics(incomes_by_day, days)
+    
+    expense_pred = expense_result['prediction']
+    income_pred = income_result['prediction']
+    
+    # Метрики якості моделі
+    r2_expense = expense_result['r2']
+    r2_income = income_result['r2']
+    mae_expense = expense_result['mae']
+    mae_income = income_result['mae']
     
     predicted_total_expense = sum(expense_pred)
     predicted_total_income = sum(income_pred)
     predicted_balance = current_balance + (predicted_total_income - predicted_total_expense)
 
+    # === ОЦІНКА ЯКОСТІ МОДЕЛІ ===
+    avg_r2 = (r2_expense + r2_income) / 2
+    if avg_r2 >= 0.8:
+        quality = "🟢 Висока точність"
+    elif avg_r2 >= 0.5:
+        quality = "🟡 Середня точність"
+    elif avg_r2 >= 0.2:
+        quality = "🟠 Низька точність"
+    else:
+        quality = "🔴 Дуже низька (тренд нестабільний)"
+
+    # === RULE-BASED СТАТУС ===
     if avg_month_income == 0:
         status = "⚪ Немає даних про доходи"
         advice = "Додайте дані про доходи для точного прогнозу"
@@ -99,21 +121,20 @@ async def make_forecast(message: Message, state: FSMContext):
         status = "🟢 Відмінно"
         advice = "Хороший запас фінансової міцності"
 
-    last_transactions = rows[-5:] if len(rows) >= 5 else rows
-    last_dates_text = "\n".join([
-        f"{datetime.strptime(date_db, '%Y-%m-%d').strftime('%d.%m.%Y')}: {amount:.2f} ({'витрата' if t_type == 'expense' else 'дохід'})"
-        for date_db, amount, t_type in last_transactions
-    ])
-
     text = (
         f"📊 Прогноз на {days} днів (лінійна регресія)\n\n"
-        f"📈 Останні транзакції:\n{last_dates_text}\n\n"
         f"📅 Період аналізу: {days_in_period} днів ({len(all_dates)} точок даних)\n"
         f"💰 Середньомісячний дохід: {avg_month_income:.2f}\n"
         f"💸 Середньомісячні витрати: {avg_month_expense:.2f}\n"
         f"⚖️ Середньомісячний баланс: {avg_month_balance:.2f}\n\n"
         f"🏦 Поточний баланс: {current_balance:.2f}\n"
         f"🔮 Прогноз балансу через {days} днів: {predicted_balance:.2f}\n\n"
+        f"📈 ЯКІСТЬ МОДЕЛІ:\n"
+        f"R² (витрати) = {r2_expense:.3f}\n"
+        f"R² (доходи) = {r2_income:.3f}\n"
+        f"Середня похибка витрат: ±{mae_expense:.2f} грн/день\n"
+        f"Середня похибка доходів: ±{mae_income:.2f} грн/день\n"
+        f"Оцінка: {quality}\n\n"
         f"{status}\n"
         f"💡 {advice}"
     )
@@ -123,11 +144,15 @@ async def make_forecast(message: Message, state: FSMContext):
             expenses_by_day, 
             incomes_by_day, 
             list(expense_pred), 
-            list(income_pred)
+            list(income_pred),
+            expense_upper=list(expense_result['upper_bound'] - expense_pred),
+            expense_lower=list(expense_result['lower_bound'] - expense_pred),
+            income_upper=list(income_result['upper_bound'] - income_pred),
+            income_lower=list(income_result['lower_bound'] - income_pred)
         )
         await message.answer(text)
         await message.answer_photo(FSInputFile(chart_path))
     except Exception as e:
-        await message.answer(f"{text}\n\n⚠️ Не вдалося побудувати графік: {str(e)}")
+        await message.answer(f"{text}\n\n⚠️ Помилка побудови графіка: {str(e)}")
     
     await state.clear()
